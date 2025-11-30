@@ -1,4 +1,4 @@
-# ADDA项目 - 散射仿真和可视化
+散射仿真和可视化
 
 ## 项目结构
 
@@ -85,3 +85,4 @@ python scripts/visualization/visualize_corrected_comparison.py
 ## 许可证
 
 ADDA软件遵循其原始许可证。
+
