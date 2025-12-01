@@ -4,16 +4,11 @@
 
 ### 1. 拷贝项目文件
 
-将整个项目文件夹拷贝到新电脑上。
+将整个 `rough_surface_simulation` 文件夹（或整个项目）拷贝到新电脑上。
 
 ### 2. 修改配置文件
 
-项目中有两个配置文件，根据你使用的脚本选择修改：
-
-- **项目根目录的 `config.py`**：用于根目录的脚本（如 `run_flat_slab_validation.py`）
-- **`rough_surface_simulation/config.py`**：用于粗糙表面仿真脚本
-
-**建议**：两个配置文件内容相同，修改其中一个即可。如果两个都修改，保持内容一致。
+打开 `rough_surface_simulation/config.py` 文件，修改以下配置：
 
 #### 2.1 ADDA可执行文件路径
 
@@ -76,24 +71,19 @@ pip install numpy matplotlib scipy
 
 ### 4. 运行项目
 
-#### 粗糙表面仿真：
+运行主脚本：
 ```bash
-# 运行主仿真
 python rough_surface_simulation/run_rough_surface_simulation.py
-
-# 补全未完成的仿真
-python rough_surface_simulation/complete_simulations.py
-
-# 生成可视化
-python rough_surface_simulation/visualize_all.py
-
-# 检查仿真状态
-python rough_surface_simulation/check_status.py
 ```
 
-#### 平板验证仿真：
+或补全未完成的仿真：
 ```bash
-python run_flat_slab_validation.py
+python rough_surface_simulation/complete_simulations.py
+```
+
+或生成可视化：
+```bash
+python rough_surface_simulation/visualize_all.py
 ```
 
 ### 5. 常见问题
@@ -107,33 +97,24 @@ A: 检查 `config.py` 中的 `SCAT_GRID_INPUT_FILE` 路径，确保文件存在�
 #### Q: GPU加速不工作
 A: 检查 `ADDA_GPU_ID` 是否正确，或者尝试使用CPU版本（将 `adda_ocl.exe` 改为 `adda.exe`）。
 
-#### Q: 导入config模块失败
-A: 确保在项目根目录运行脚本，或者将 `config.py` 所在目录添加到Python路径。
-
 ### 6. 文件结构
 
 ```
-项目根目录/
-├── config.py                          # 配置文件（需要修改）
-├── run_flat_slab_validation.py         # 平板验证脚本
-├── rough_surface_simulation/
-│   ├── config.py                      # 配置文件（需要修改）
-│   ├── generate_rough_surface.py      # 粗糙表面生成
-│   ├── run_rough_surface_simulation.py  # 主仿真脚本
-│   ├── complete_simulations.py         # 补全未完成仿真
-│   ├── visualize_all.py               # 可视化脚本
-│   ├── check_status.py                 # 检查仿真状态
-│   ├── README_PORT.md                  # 详细移植指南
-│   ├── corr_0/                        # 相关长=0的仿真结果
-│   │   ├── nosurf/
-│   │   └── withsurf/
-│   ├── corr_8/                        # 相关长=8的仿真结果
-│   │   ├── nosurf/
-│   │   └── withsurf/
-│   └── figures/                       # 可视化结果
-└── flat_slab_validation/              # 平板验证结果
-    ├── nosurf/
-    └── withsurf/
+rough_surface_simulation/
+├── config.py                    # 配置文件（需要修改）
+├── generate_rough_surface.py    # 粗糙表面生成
+├── run_rough_surface_simulation.py  # 主仿真脚本
+├── complete_simulations.py      # 补全未完成仿真
+├── visualize_all.py             # 可视化脚本
+├── check_status.py              # 检查仿真状态
+├── README_PORT.md               # 本文件
+├── corr_0/                      # 相关长=0的仿真结果
+│   ├── nosurf/
+│   └── withsurf/
+├── corr_8/                      # 相关长=8的仿真结果
+│   ├── nosurf/
+│   └── withsurf/
+└── figures/                     # 可视化结果
 ```
 
 ### 7. 注意事项
@@ -142,5 +123,4 @@ A: 确保在项目根目录运行脚本，或者将 `config.py` 所在目录添�
 - Windows路径使用 `r'...'` 原始字符串避免转义问题
 - Linux路径使用正斜杠 `/`
 - 确保ADDA可执行文件有执行权限（Linux）
-- 如果修改了配置文件，需要重启Python脚本才能生效
 

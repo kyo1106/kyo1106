@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-项目配置文件 - 在移植到其他电脑时需要修改此文件
+配置文件 - 在移植到其他电脑时需要修改此文件
 """
 import os
 from pathlib import Path
@@ -32,8 +32,8 @@ def get_adda_executable():
     elif ADDA_ROOT:
         return os.path.join(ADDA_ROOT, ADDA_EXECUTABLE.lstrip('.\\'))
     else:
-        # 相对于项目根目录
-        project_root = Path(__file__).parent
+        # 相对于项目根目录（rough_surface_simulation/config.py的父目录的父目录）
+        project_root = Path(__file__).parent.parent
         return str(project_root / ADDA_EXECUTABLE.lstrip('.\\'))
 
 def get_scat_grid_input():
@@ -43,7 +43,7 @@ def get_scat_grid_input():
     elif ADDA_ROOT:
         return os.path.join(ADDA_ROOT, SCAT_GRID_INPUT_FILE.replace('\\', os.sep))
     else:
-        # 相对于项目根目录
-        project_root = Path(__file__).parent
+        # 相对于项目根目录（rough_surface_simulation/config.py的父目录的父目录）
+        project_root = Path(__file__).parent.parent
         return str(project_root / SCAT_GRID_INPUT_FILE.replace('\\', os.sep))
 
