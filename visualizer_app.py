@@ -46,6 +46,7 @@ class ADDAVisualizerApp:
         
         self.scat_element = tk.StringVar(value="S11")
         self.log_mueller = tk.BooleanVar(value=False)
+        self.convert_coords = tk.BooleanVar(value=True)  # Whether to convert beam->lab for non-surf
         self._scat_cbar = None
         self._cached_prop = {}
         
@@ -127,6 +128,16 @@ class ADDAVisualizerApp:
         
         ttk.Button(g4, text="Load Geometry Overlay...", command=self.manual_load_geometry).pack(fill="x", pady=(10, 2))
         ttk.Button(g4, text="Redraw 3D", command=self.update_int_3d).pack(fill="x", pady=2)
+        
+        # Group 5: Far Field Calculation (NTFF)
+        g5 = ttk.LabelFrame(ctrl, text="Far Field Analysis (NTFF)", padding=10)
+        g5.pack(fill="x", padx=5, pady=5)
+        ttk.Label(g5, text="Calculate far field from internal field\nusing Near-to-Far Field Transformation", 
+                  font=("TkDefaultFont", 9), foreground="blue").pack(anchor="w", pady=(0, 5))
+        ttk.Button(g5, text="Calculate Far Field (NTFF)", command=self.calc_ntff_compare,
+                   width=30).pack(fill="x", pady=2)
+        ttk.Label(g5, text="Note: Uses current Z-slice from above", 
+                  font=("TkDefaultFont", 8), foreground="gray").pack(anchor="w", pady=(2, 0))
 
         # --- Plots ---
         plot_frame = ttk.Frame(paned)
@@ -165,8 +176,20 @@ class ADDAVisualizerApp:
         ttk.Combobox(ctrl, textvariable=self.scat_element, values=els, state="readonly").pack(side="left", padx=5)
         ttk.Button(ctrl, text="Update View", command=self.update_scat_plots).pack(side="left")
         
+        # Coordinate conversion option removed - always use original coordinates
+        
+        # --- NTFF Calculation from Internal Field ---
+        ttk.Label(ctrl, text="|").pack(side="left", padx=(20, 5))
+        ntff_frame = ttk.LabelFrame(ctrl, text="NTFF: Calculate Far Field from Internal Field", padding=6)
+        ntff_frame.pack(side="left", padx=(10, 0))
+        ttk.Button(ntff_frame, text="Calculate NTFF", command=self.calc_ntff_compare, 
+                   style="Accent.TButton").pack(side="left", padx=2)
+        ttk.Label(ntff_frame, text="(Uses current Z-slice from Internal Field tab)", 
+                  font=("TkDefaultFont", 8), foreground="gray").pack(side="left", padx=5)
+        
         # --- NTFF Comparison (2D Overlay) ---
-        ttk.Label(ctrl, text="Analysis:").pack(side="left", padx=(20, 5))
+        ttk.Label(ctrl, text="|").pack(side="left", padx=(20, 5))
+        ttk.Label(ctrl, text="Analysis:").pack(side="left", padx=(5, 5))
         dual = ttk.LabelFrame(ctrl, text="Compare two runs (mueller 3D)", padding=6)
         dual.pack(side="left", padx=(20, 0))
         self.dual_run1 = tk.StringVar(value="run_rayleigh_free_45")
@@ -312,9 +335,100 @@ class ADDAVisualizerApp:
                     
         except: pass
 
+    def _get_polarization_vectors(self, log_file):
+        """Extract polarization vectors from ADDA log file (from visualize_all.py)"""
+        try:
+            with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+                import re
+                pol_x_match = re.search(
+                    r"Incident polarization X\(per\):\s*\(([-\d.]+),([-\d.]+),([-\d.]+)\)", content
+                )
+                pol_y_match = re.search(
+                    r"Incident polarization Y\(par\):\s*\(([-\d.]+),([-\d.]+),([-\d.]+)\)", content
+                )
+                if pol_x_match and pol_y_match:
+                    inc_pol_x = np.array([
+                        float(pol_x_match.group(1)), 
+                        float(pol_x_match.group(2)), 
+                        float(pol_x_match.group(3))
+                    ])
+                    inc_pol_y = np.array([
+                        float(pol_y_match.group(1)), 
+                        float(pol_y_match.group(2)), 
+                        float(pol_y_match.group(3))
+                    ])
+                    return inc_pol_x, inc_pol_y
+        except Exception:
+            pass
+        # Default fallback
+        return np.array([-0.7071, 0.0, -0.7071]), np.array([0.0, 1.0, 0.0])
+    
+    def _has_surf_mode(self, log_file):
+        """Check if ADDA simulation used -surf mode"""
+        try:
+            import re
+            with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+                # Check command line for -surf
+                if re.search(r"-surf\s+", content):
+                    return True
+                # Also check for substrate info in log
+                if re.search(r"substrate|Substrate", content, re.IGNORECASE):
+                    return True
+        except Exception:
+            pass
+        return False
+    
+    def _get_propagation_direction(self, log_file):
+        """Extract propagation direction from ADDA log file"""
+        try:
+            import re
+            with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+                # Look for "Incident propagation vector: (x,y,z)" format
+                # Example: "Incident propagation vector: (0.707107,0,-0.707107)"
+                prop_match = re.search(
+                    r"Incident propagation vector:\s*\(([-\d.]+),([-\d.]+),([-\d.]+)\)", 
+                    content
+                )
+                if prop_match:
+                    prop = np.array([
+                        float(prop_match.group(1)),
+                        float(prop_match.group(2)),
+                        float(prop_match.group(3))
+                    ])
+                    # Normalize to unit vector
+                    prop = prop / np.linalg.norm(prop)
+                    return prop
+        except Exception as e:
+            print(f"Warning: Failed to parse propagation direction: {e}")
+        # Default: negative z direction (typical for ADDA)
+        return np.array([0.0, 0.0, -1.0])
+    
+    def _beam_to_lab_direction(self, theta_beam, phi_beam, prop, inc_pol_x, inc_pol_y):
+        """Convert beam frame to lab frame (from visualize_all.py)"""
+        theta_rad = np.radians(theta_beam)
+        phi_rad = np.radians(phi_beam)
+        cos_theta = np.cos(theta_rad)[:, np.newaxis]
+        sin_theta = np.sin(theta_rad)[:, np.newaxis]
+        cos_phi = np.cos(phi_rad)[:, np.newaxis]
+        sin_phi = np.sin(phi_rad)[:, np.newaxis]
+        robs_beam = cos_theta * prop + sin_theta * (cos_phi * inc_pol_x + sin_phi * inc_pol_y)
+        norm = np.linalg.norm(robs_beam, axis=1, keepdims=True)
+        return robs_beam / norm
+    
+    def _direction_to_lab_angles(self, robs):
+        """Convert direction vector to lab frame angles (from visualize_all.py)"""
+        theta_lab = np.degrees(np.arccos(np.clip(robs[:, 2], -1, 1)))
+        phi_lab = np.degrees(np.arctan2(robs[:, 1], robs[:, 0]))
+        phi_lab[phi_lab < 0] += 360
+        return theta_lab, phi_lab
+
     def reload_scat_data(self):
         d = self.current_run_dir.get()
         p = Path(d) / "mueller_scatgrid"
+        log_p = Path(d) / "log"
         if not p.exists():
             self.scat_data = None
             self.status_var.set("未找到 mueller_scatgrid")
@@ -322,31 +436,85 @@ class ADDAVisualizerApp:
         try:
             raw = np.loadtxt(p, skiprows=1)
             if raw.ndim == 1: raw = raw.reshape(1,-1)
-            self.scat_data = {'theta': raw[:,0], 'phi': raw[:,1], 'm': raw[:,2:]}
+            
+            # Use original coordinates directly (no conversion, already in lab frame)
+            theta_lab = raw[:,0]
+            phi_lab = raw[:,1]
+            
+            # Store data
+            self.scat_data = {
+                'theta': theta_lab, 
+                'phi': phi_lab, 
+                'm': raw[:,2:]
+            }
             self.update_scat_plots()
         except Exception as exc:
             self.scat_data = None
             messagebox.showerror("远场读取失败", str(exc))
 
     def calc_ntff_compare(self):
-        """Angle-spectrum far-field from current Z slice, with Mueller comparison."""
+        """Angle-spectrum far-field from Z slice(s) in air layer, with Mueller comparison."""
         if not self.int_data:
             messagebox.showwarning("Missing data", "Load IntField first.")
             return
 
-        # 当前 Z 切片数据
-        idx = self.current_z_idx.get()
-        idx = max(0, min(idx, len(self.layers)-1))
-        z_val = self.layers[idx]
-        mask = self._get_slice_mask(z_val)
-        if not np.any(mask):
-            messagebox.showwarning("Empty slice", f"Z={z_val:.4f} has no points")
+        # Ask user how many slices to average (default: current slice only)
+        try:
+            n_slices_str = simpledialog.askstring(
+                "Multi-slice averaging", 
+                "Number of Z slices to average (air layer only, must be odd):\n" +
+                f"Current Z index: {self.current_z_idx.get()}\n" +
+                f"Total layers: {len(self.layers)}\n" +
+                "Enter 1 for single slice, 3/5/7 for averaging:",
+                initialvalue="1"
+            )
+            if n_slices_str is None:
+                return
+            n_slices = int(n_slices_str)
+            if n_slices < 1 or n_slices % 2 == 0:
+                messagebox.showerror("Invalid", "Number of slices must be odd and >= 1")
+                return
+        except (ValueError, TypeError):
+            messagebox.showerror("Invalid", "Please enter a valid number")
             return
 
-        x_slice = self.int_data['x'][mask]
-        y_slice = self.int_data['y'][mask]
-        Ex_slice = self.int_data['Ex'][mask]
-        Ey_slice = self.int_data['Ey'][mask]
+        # Select slices around current Z index
+        idx_center = self.current_z_idx.get()
+        idx_center = max(0, min(idx_center, len(self.layers)-1))
+        half_span = (n_slices - 1) // 2
+        idx_start = max(0, idx_center - half_span)
+        idx_end = min(len(self.layers), idx_center + half_span + 1)
+        selected_indices = list(range(idx_start, idx_end))
+        
+        if len(selected_indices) == 0:
+            messagebox.showwarning("No slices", "No valid slices selected")
+            return
+        
+        # Collect data from all selected slices
+        all_x, all_y, all_Ex, all_Ey = [], [], [], []
+        z_vals_used = []
+        
+        for idx in selected_indices:
+            z_val = self.layers[idx]
+            mask = self._get_slice_mask(z_val)
+            if np.any(mask):
+                all_x.append(self.int_data['x'][mask])
+                all_y.append(self.int_data['y'][mask])
+                all_Ex.append(self.int_data['Ex'][mask])
+                all_Ey.append(self.int_data['Ey'][mask])
+                z_vals_used.append(z_val)
+        
+        if len(all_x) == 0:
+            messagebox.showwarning("Empty slices", "No valid data in selected slices")
+            return
+        
+        # Combine all slices (for averaging)
+        x_slice = np.concatenate(all_x)
+        y_slice = np.concatenate(all_y)
+        Ex_slice = np.concatenate(all_Ex)
+        Ey_slice = np.concatenate(all_Ey)
+        
+        z_val_display = f"{z_vals_used[0]:.4f}" if len(z_vals_used) == 1 else f"{z_vals_used[0]:.4f}~{z_vals_used[-1]:.4f} ({len(z_vals_used)} slices)"
 
         # 波长：尝试从 log 解析，否则询问
         wl = None
@@ -401,22 +569,23 @@ class ADDAVisualizerApp:
         Ex_grid = np.pad(Ex_grid, ((pad, pad), (pad, pad)), mode="constant")
         Ey_grid = np.pad(Ey_grid, ((pad, pad), (pad, pad)), mode="constant")
 
-        # 2D FFT
+        # 2D FFT - only Ex and Ey components (Ez not needed for 2D slice)
         Ex_k = np.fft.fftshift(np.fft.fft2(Ex_grid))
         Ey_k = np.fft.fftshift(np.fft.fft2(Ey_grid))
+        # Intensity from Ex and Ey only
         I_fft = np.abs(Ex_k)**2 + np.abs(Ey_k)**2
         # k axes
         kx_vals = np.fft.fftshift(np.fft.fftfreq(Ex_grid.shape[1], d=dx)) * 2 * np.pi
         ky_vals = np.fft.fftshift(np.fft.fftfreq(Ex_grid.shape[0], d=dy)) * 2 * np.pi
         KX, KY = np.meshgrid(kx_vals, ky_vals)
 
-        # propagating mask and weighting
+        # propagating mask - only consider propagating modes (inside light cone)
         mask_prop = (KX**2 + KY**2) <= k0**2
-        kz = np.zeros_like(KX)
-        kz[mask_prop] = np.sqrt(k0**2 - KX[mask_prop]**2 - KY[mask_prop]**2)
-        weight = np.zeros_like(I_fft)
-        weight[mask_prop] = (kz[mask_prop] / k0)**2
-        I_ang = I_fft * weight
+        
+        # No weighting - use FFT intensity directly
+        # The FFT already gives the angular spectrum representation
+        I_ang = I_fft.copy()
+        I_ang[~mask_prop] = 0  # Zero out evanescent modes
 
         # log normalization
         def norm_and_log(arr, mask=None):
@@ -454,7 +623,7 @@ class ADDAVisualizerApp:
         extent = [-lim, lim, -lim, lim]
 
         top = tk.Toplevel(self.root)
-        top.title(f"Far-field spectrum (Z={z_val:.4f}, λ={wl})")
+        top.title(f"Far-field spectrum (Z={z_val_display}, λ={wl}, {len(z_vals_used)} slice{'s' if len(z_vals_used) > 1 else ''})")
         top.geometry("1100x760")
 
         fig = plt.Figure(figsize=(12, 6.5), dpi=100)
@@ -515,13 +684,22 @@ class ADDAVisualizerApp:
                     mu_grid[pi, ti] = s
                 mu_log = np.log10(mu_grid / mu_grid.max() + 1e-12)
 
-                # 将自算角谱映射到 theta-phi 网格
-                theta_map = np.arcsin(np.sqrt(KX**2 + KY**2) / k0)
-                phi_map = np.mod(np.arctan2(KY, KX), 2 * np.pi)
-                valid = np.isfinite(theta_map) & np.isfinite(I_ang_log)
-                pts = np.stack([theta_map[valid], phi_map[valid]], axis=1)
-                vals = I_ang_log[valid]
-                ours_on_mu = griddata(pts, vals, (TH, PH), method="linear", fill_value=np.nan)
+                # 将自算角谱映射到 mueller_scatgrid 的 theta-phi 网格
+                # NTFF结果：kx/k0, ky/k0 -> theta (from z-axis), phi (azimuthal)
+                # mueller_scatgrid已经是lab frame，不需要转换
+                k_xy = np.sqrt(KX**2 + KY**2)
+                theta_ntff_rad = np.arcsin(np.clip(k_xy / k0, 0, 1))  # [0, π/2] radians
+                phi_ntff_rad = np.mod(np.arctan2(KY, KX), 2 * np.pi)  # [0, 2π] radians
+                
+                # Only use propagating modes (upper hemisphere: theta 0-90 degrees)
+                valid = mask_prop & np.isfinite(theta_ntff_rad) & np.isfinite(phi_ntff_rad) & np.isfinite(I_ang_log) & (theta_ntff_rad >= 0) & (theta_ntff_rad <= np.pi/2)
+                
+                # Map NTFF to mueller grid (both in lab frame, radians)
+                pts_ntff = np.column_stack([theta_ntff_rad[valid], phi_ntff_rad[valid]])
+                vals_ntff = I_ang_log[valid]
+                
+                # 直接映射到mueller的theta/phi网格（都是lab frame，弧度单位）
+                ours_on_mu = griddata(pts_ntff, vals_ntff, (TH, PH), method="linear", fill_value=np.nan)
 
                 vmin_mu, vmax_mu = dyn_limits(ours_on_mu, db=6)
                 vmin_mu, vmax_mu = dyn_limits(ours_on_mu, db=6)
@@ -635,30 +813,125 @@ class ADDAVisualizerApp:
         return np.isclose(z_all, near_val, atol=1e-6)
 
     def update_int_3d(self):
+        """3D volume visualization using layered surfaces (exactly like visualize_all.py)"""
         if not self.int_data: return
         self.ax3d.clear()
+        
         x = self.int_data['x']
         y = self.int_data['y']
         z = self.int_data['z']
         v = self.int_data['I']
-
-        step = max(1, len(x)//5000)
-        sc = self.ax3d.scatter(x[::step], y[::step], z[::step],
-                               c=v[::step],
-                               cmap=self.cmap_var.get(),
-                               alpha=self.alpha_val.get(),
-                               s=self.pt_size.get(),
-                               norm=matplotlib.colors.Normalize(vmin=v.min(), vmax=v.max()))
-
-        self.ax3d.set_xlabel("X")
-        self.ax3d.set_ylabel("Y")
-        self.ax3d.set_zlabel("Z")
-        self.ax3d.set_title("3D Volumetric Cloud")
+        
+        # Convert to indices (exactly like visualize_all.py)
+        coords = np.column_stack([x, y, z])
+        ix, iy, iz, nx_act, ny_act, nz_act = self._coords_to_indices(coords)
+        
+        # Build 3D array
+        e_3d = np.zeros((nx_act, ny_act, nz_act))
+        for i in range(len(ix)):
+            if 0 <= ix[i] < nx_act and 0 <= iy[i] < ny_act and 0 <= iz[i] < nz_act:
+                e_3d[int(ix[i]), int(iy[i]), int(iz[i])] = v[i]
+        
+        # Create meshgrid for coordinates (exactly like visualize_all.py)
+        x_coords_3d, y_coords_3d, z_coords_3d = np.meshgrid(
+            np.arange(nx_act), np.arange(ny_act), np.arange(nz_act), indexing="ij"
+        )
+        
+        # Select layers to show (exactly like visualize_all.py)
+        layers_to_show = list(range(0, nz_act, max(1, max(nz_act // 15, 1))))
+        
+        # Get colormap (use jet as default like visualize_all.py, but allow user choice)
+        cmap_name = self.cmap_var.get()
+        cmap_obj = plt.get_cmap(cmap_name)
+        
+        # Plot each layer as a surface (exactly like visualize_all.py)
+        for z_layer in layers_to_show:
+            e_layer = e_3d[:, :, z_layer]
+            x_flat = x_coords_3d[:, :, z_layer].flatten()
+            y_flat = y_coords_3d[:, :, z_layer].flatten()
+            e_flat = e_layer.flatten()
+            
+            mask = e_flat > 0
+            if not np.any(mask):
+                continue
+            
+            x_valid = x_flat[mask]
+            y_valid = y_flat[mask]
+            e_valid = e_flat[mask]
+            
+            # Interpolate to denser grid (exactly like visualize_all.py)
+            interp_factor = 2
+            x_dense = np.linspace(0, nx_act - 1, nx_act * interp_factor)
+            y_dense = np.linspace(0, ny_act - 1, ny_act * interp_factor)
+            x_dense_grid, y_dense_grid = np.meshgrid(x_dense, y_dense)
+            
+            e_interp = griddata(
+                np.column_stack([x_valid, y_valid]),
+                e_valid,
+                (x_dense_grid, y_dense_grid),
+                method="cubic",
+                fill_value=0,
+            )
+            
+            # Normalize this layer (exactly like visualize_all.py)
+            e_min = e_interp[e_interp > 0].min() if np.any(e_interp > 0) else 0
+            e_max = e_interp.max()
+            if e_max > e_min:
+                e_norm = (e_interp - e_min) / (e_max - e_min)
+            else:
+                e_norm = np.zeros_like(e_interp)
+            
+            # Get colors (exactly like visualize_all.py: plt.cm.jet(e_norm))
+            # But use user-selected colormap instead of hardcoded jet
+            colors = cmap_obj(e_norm)
+            
+            # Create z surface at this layer
+            z_surface = np.full_like(x_dense_grid, z_layer)
+            
+            # Plot surface (exactly like visualize_all.py)
+            self.ax3d.plot_surface(
+                x_dense_grid,
+                y_dense_grid,
+                z_surface,
+                facecolors=colors,
+                alpha=self.alpha_val.get(),
+                shade=False,
+                edgecolor="none",
+                linewidth=0,
+                antialiased=True,
+            )
+        
+        self.ax3d.set_xlabel("X index")
+        self.ax3d.set_ylabel("Y index")
+        self.ax3d.set_zlabel("Z index")
+        self.ax3d.set_title("3D Internal Field Volume")
+        self.ax3d.set_xlim([0, nx_act - 1])
+        self.ax3d.set_ylim([0, ny_act - 1])
+        self.ax3d.set_zlim([0, nz_act - 1])
+        self.ax3d.view_init(elev=20, azim=-45)
         self.ax3d.set_box_aspect([1, 1, 1])
         self.cv3d.draw()
+    
+    def _coords_to_indices(self, coords):
+        """Convert coordinates to indices (from visualize_all.py)"""
+        x_unique = sorted(np.unique(coords[:, 0]))
+        y_unique = sorted(np.unique(coords[:, 1]))
+        z_unique = sorted(np.unique(coords[:, 2]))
+        x_map = {val: idx for idx, val in enumerate(x_unique)}
+        y_map = {val: idx for idx, val in enumerate(y_unique)}
+        z_map = {val: idx for idx, val in enumerate(z_unique)}
+        
+        ix = np.array([x_map[x] for x in coords[:, 0]])
+        iy = np.array([y_map[y] for y in coords[:, 1]])
+        iz = np.array([z_map[z] for z in coords[:, 2]])
+        
+        return ix, iy, iz, len(x_unique), len(y_unique), len(z_unique)
 
     def update_scat_plots(self):
-        if not self.scat_data: return
+        if not self.scat_data: 
+            messagebox.showwarning("No data", "Please load mueller_scatgrid data first.")
+            return
+        
         self.ax_scat.clear()
         
         el = self.scat_element.get()
@@ -668,48 +941,79 @@ class ADDAVisualizerApp:
         idx = row*4 + col
 
         val = self.scat_data['m'][:, idx]
-        # Spherical -> Cartesian
-        tr = np.radians(self.scat_data['theta'])
-        pr = np.radians(self.scat_data['phi'])
-        X = np.sin(tr) * np.cos(pr)
-        Y = np.sin(tr) * np.sin(pr)
-        Z = np.cos(tr)
+        # Use lab frame coordinates
+        theta_lab = self.scat_data['theta']
+        phi_lab = self.scat_data['phi']
+        
+        # Only show upper hemisphere (like visualize_all.py)
+        mask_upper = theta_lab <= 90
+        if not np.any(mask_upper):
+            messagebox.showwarning("No upper hemisphere data", "No data points in upper hemisphere (theta <= 90)")
+            return
+        
+        theta_upper = theta_lab[mask_upper]
+        phi_upper = phi_lab[mask_upper]
+        val_upper = val[mask_upper]
 
         # Choose scaling and colormap
         cmap_name = self.cmap_var.get()
         if el == "S11":
-            plot_vals = val  # linear S11
-            norm = matplotlib.colors.Normalize(vmin=plot_vals.min(), vmax=plot_vals.max())
+            plot_vals = val_upper  # linear S11
+            vmin, vmax = plot_vals.min(), plot_vals.max()
+            if vmax <= vmin:
+                vmax = vmin + 1e-10
+            norm = matplotlib.colors.Normalize(vmin=vmin, vmax=vmax)
         else:
-            plot_vals = val
+            plot_vals = val_upper
             vmax = np.max(np.abs(plot_vals))
+            if vmax <= 0:
+                vmax = 1e-10
             norm = TwoSlopeNorm(vmin=-vmax, vcenter=0.0, vmax=vmax)
             cmap_name = "coolwarm"
 
-        # Surface interpolation over full sphere grid (lower res for speed)
-        th_grid = np.linspace(0, np.pi, 91)
-        ph_grid = np.linspace(0, 2*np.pi, 181)
-        TH, PH = np.meshgrid(th_grid, ph_grid)
-        surf_vals = griddata((tr, pr), plot_vals, (TH, PH), method="nearest")
-        finite_mask = np.isfinite(surf_vals)
-        fill_val = np.nanmin(surf_vals) if np.any(finite_mask) else plot_vals.min()
-        surf_vals = np.where(finite_mask, surf_vals, fill_val)
-        XS = np.sin(TH) * np.cos(PH)
-        YS = np.sin(TH) * np.sin(PH)
-        ZS = np.cos(TH)
+        # Surface interpolation over upper hemisphere grid (like visualize_all.py)
+        theta_min, theta_max = theta_upper.min(), theta_upper.max()
+        phi_min, phi_max = phi_upper.min(), phi_upper.max()
+        n_theta = min(91, len(np.unique(theta_upper)))
+        n_phi = min(361, len(np.unique(phi_upper)))
+        
+        theta_grid = np.linspace(theta_min, theta_max, n_theta)
+        phi_grid = np.linspace(phi_min, phi_max, n_phi)
+        theta_grid_mesh, phi_grid_mesh = np.meshgrid(theta_grid, phi_grid, indexing="ij")
+        
+        points = np.column_stack([theta_upper, phi_upper])
+        # Use fill_value=np.nan to better handle missing data
+        surf_vals = griddata(points, plot_vals, (theta_grid_mesh, phi_grid_mesh), method="linear", fill_value=np.nan)
+        
+        # Mask out NaN values for plotting
+        valid_mask = np.isfinite(surf_vals)
+        if not np.any(valid_mask):
+            messagebox.showwarning("No valid data", "Interpolation produced no valid data points")
+            return
+        
+        # Convert to Cartesian for 3D surface
+        theta_surf = np.radians(theta_grid_mesh)
+        phi_surf = np.radians(phi_grid_mesh)
+        XS = np.sin(theta_surf) * np.cos(phi_surf)
+        YS = np.sin(theta_surf) * np.sin(phi_surf)
+        ZS = np.cos(theta_surf)
+        
+        # Apply colormap, handling NaN values
         colors = plt.get_cmap(cmap_name)(norm(surf_vals))
-        colors[..., -1] = 0.92
+        colors[..., -1] = 0.92  # Set alpha
+        colors[~valid_mask, -1] = 0  # Make NaN regions transparent
 
         self.ax_scat.plot_surface(XS, YS, ZS, rstride=1, cstride=1,
                                   facecolors=colors, linewidth=0, antialiased=True, shade=False)
-        self.ax_scat.set_title(f"3D {el} Scattering Pattern")
+        self.ax_scat.set_title(f"3D {el} Scattering Pattern (Lab Frame, Upper Hemisphere)")
         self.ax_scat.set_axis_off()
         self.ax_scat.set_box_aspect([1,1,1])
         try:
             self.ax_scat.set_proj_type("ortho")
         except Exception:
             pass
-        # clear previous colorbars/axes
+        
+        # Clear previous colorbars/axes
         for a in list(self.fig_scat.axes):
             if a is not self.ax_scat:
                 try:
@@ -722,10 +1026,12 @@ class ADDAVisualizerApp:
             except Exception:
                 pass
             self._scat_cbar = None
+        
+        # Create colorbar with proper mappable
         mappable = cm.ScalarMappable(norm=norm, cmap=plt.get_cmap(cmap_name))
-        mappable.set_array([])
+        mappable.set_array(surf_vals[valid_mask])  # Set array with valid values only
         self._scat_cbar = self.fig_scat.colorbar(mappable, ax=self.ax_scat, fraction=0.046, pad=0.04, label=el)
-        self.status_var.set(f"{el}: min={val.min():.3e}, max={val.max():.3e} (linear)")
+        self.status_var.set(f"{el}: min={plot_vals.min():.3e}, max={plot_vals.max():.3e} (linear)")
         self.cv_scat.draw()
 
     def compare_two_scat(self):
@@ -743,18 +1049,30 @@ class ADDAVisualizerApp:
             data = np.loadtxt(p, skiprows=1)
             if data.ndim == 1:
                 data = data.reshape(1, -1)
-            theta = np.radians(data[:, 0])
-            phi = np.radians(data[:, 1])
+            
+            # Use original coordinates directly (no conversion, already in lab frame)
             s11 = data[:, 2]
-            # ADDA mueller_scatgrid is already in lab frame (theta,phi)
-            x = np.sin(theta) * np.cos(phi)
-            y = np.sin(theta) * np.sin(phi)
-            z = np.cos(theta)
+            theta_lab = data[:, 0]
+            phi_lab = data[:, 1]
+            
+            # Only upper hemisphere
+            mask_upper = theta_lab <= 90
+            theta_upper = theta_lab[mask_upper]
+            phi_upper = phi_lab[mask_upper]
+            s11_upper = s11[mask_upper]
+            
+            # Convert to Cartesian
+            theta_rad = np.radians(theta_upper)
+            phi_rad = np.radians(phi_upper)
+            x = np.sin(theta_rad) * np.cos(phi_rad)
+            y = np.sin(theta_rad) * np.sin(phi_rad)
+            z = np.cos(theta_rad)
+            
             if log_scale:
-                s_val = np.log10(np.maximum(s11, 1e-16))
+                s_val = np.log10(np.maximum(s11_upper, 1e-16))
             else:
-                s_val = s11
-            return {"x": x, "y": y, "z": z, "s": s_val, "raw": s11, "theta": theta, "phi": phi}
+                s_val = s11_upper
+            return {"x": x, "y": y, "z": z, "s": s_val, "raw": s11_upper, "theta": theta_upper, "phi": phi_upper}
 
         try:
             d1 = load_mueller(run1, self.log_mueller.get())
@@ -763,29 +1081,43 @@ class ADDAVisualizerApp:
             messagebox.showerror("Load failed", str(exc))
             return
 
-        s_all = np.concatenate([d1["s"], d2["s"]])
-        vmin = np.nanmin(s_all)
-        vmax = np.nanmax(s_all)
-        if vmax <= vmin:
-            vmax = vmin + 1e-6
-        shared_norm = matplotlib.colors.Normalize(vmin=vmin, vmax=vmax)
-
-        def make_surface(ax, data, title, norm):
-            # plot spherical surface via interpolation on unit sphere grid
-            # coarser grid to speed up rendering
-            th_grid = np.linspace(0, np.pi, 61)
-            ph_grid = np.linspace(0, 2*np.pi, 121)
-            TH, PH = np.meshgrid(th_grid, ph_grid)
-            # map lab xyz to theta/phi for interpolation
-            theta_lab = np.arccos(np.clip(data["z"], -1, 1))
-            phi_lab = np.mod(np.arctan2(data["y"], data["x"]), 2*np.pi)
-            surf_vals = griddata((theta_lab, phi_lab), data["s"], (TH, PH), method="linear")
+        def make_surface(ax, data, title):
+            # Use lab frame theta/phi directly (already converted and filtered to upper hemisphere)
+            theta_lab = data["theta"]  # Already in degrees, upper hemisphere only
+            phi_lab = data["phi"]  # Already in degrees
+            s_vals = data["s"]
+            
+            # Create grid for upper hemisphere only (like visualize_all.py)
+            theta_min, theta_max = theta_lab.min(), theta_lab.max()
+            phi_min, phi_max = phi_lab.min(), phi_lab.max()
+            n_theta = min(91, len(np.unique(theta_lab)))
+            n_phi = min(361, len(np.unique(phi_lab)))
+            
+            theta_grid = np.linspace(theta_min, theta_max, n_theta)
+            phi_grid = np.linspace(phi_min, phi_max, n_phi)
+            theta_grid_mesh, phi_grid_mesh = np.meshgrid(theta_grid, phi_grid, indexing="ij")
+            
+            # Interpolate using lab frame coordinates
+            points = np.column_stack([theta_lab, phi_lab])
+            surf_vals = griddata(points, s_vals, (theta_grid_mesh, phi_grid_mesh), method="linear", fill_value=0)
             finite_mask = np.isfinite(surf_vals)
-            fill_val = np.nanmin(surf_vals) if np.any(finite_mask) else vmin
+            fill_val = np.nanmin(surf_vals) if np.any(finite_mask) else np.nanmin(s_vals)
             surf_vals = np.where(finite_mask, surf_vals, fill_val)
-            X = np.sin(TH) * np.cos(PH)
-            Y = np.sin(TH) * np.sin(PH)
-            Z = np.cos(TH)
+            
+            # Create independent norm for this surface
+            vmin = np.nanmin(surf_vals)
+            vmax = np.nanmax(surf_vals)
+            if vmax <= vmin:
+                vmax = vmin + 1e-6
+            norm = matplotlib.colors.Normalize(vmin=vmin, vmax=vmax)
+            
+            # Convert to Cartesian for 3D surface
+            theta_surf = np.radians(theta_grid_mesh)
+            phi_surf = np.radians(phi_grid_mesh)
+            X = np.sin(theta_surf) * np.cos(phi_surf)
+            Y = np.sin(theta_surf) * np.sin(phi_surf)
+            Z = np.cos(theta_surf)
+            
             colors = cm.get_cmap("jet")(norm(surf_vals))
             colors[..., -1] = 0.92
             ax.plot_surface(X, Y, Z, rstride=1, cstride=1, facecolors=colors,
@@ -800,16 +1132,21 @@ class ADDAVisualizerApp:
                 ax.set_proj_type("ortho")
             except Exception:
                 pass
+            return norm, surf_vals
 
         # clear figure
         self.fig_scat.clf()
         ax1 = self.fig_scat.add_subplot(121, projection="3d")
         ax2 = self.fig_scat.add_subplot(122, projection="3d")
-        make_surface(ax1, d1, f"{run1.name}", shared_norm)
-        make_surface(ax2, d2, f"{run2.name}", shared_norm)
+        norm1, surf_vals1 = make_surface(ax1, d1, f"{run1.name}")
+        norm2, surf_vals2 = make_surface(ax2, d2, f"{run2.name}")
+        
         label = "log10(S11)" if self.log_mueller.get() else "S11"
-        mappable1 = cm.ScalarMappable(norm=shared_norm, cmap="jet")
-        mappable2 = cm.ScalarMappable(norm=shared_norm, cmap="jet")
+        # Create independent colorbars for each surface
+        mappable1 = cm.ScalarMappable(norm=norm1, cmap="jet")
+        mappable1.set_array(surf_vals1)
+        mappable2 = cm.ScalarMappable(norm=norm2, cmap="jet")
+        mappable2.set_array(surf_vals2)
         self.fig_scat.colorbar(mappable1, ax=ax1, fraction=0.046, pad=0.04, label=label)
         self.fig_scat.colorbar(mappable2, ax=ax2, fraction=0.046, pad=0.04, label=label)
         self.cv_scat.draw()
